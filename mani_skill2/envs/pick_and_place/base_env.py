@@ -45,6 +45,36 @@ class StationaryManipulationEnv(BaseEnv):
             return builder.build_static(name)
         else:
             return builder.build(name)
+        
+    def _build_table(
+        self,
+        size,
+        height,
+        thickness=0.1,
+        color=(0.8, 0.6, 0.4),
+        name='table',
+    ) -> sapien.Actor:
+        """Create a table (a collection of collision and visual shapes)."""
+        builder = self._scene.create_actor_builder()
+        
+        # Tabletop
+        tabletop_pose = sapien.Pose([0., 0., -thickness / 2])  # Make the top surface's z equal to 0
+        tabletop_half_size = [size / 2, size / 2, thickness / 2]
+        builder.add_box_collision(pose=tabletop_pose, half_size=tabletop_half_size)
+        builder.add_box_visual(pose=tabletop_pose, half_size=tabletop_half_size, color=color)
+        
+        # Table legs (x4)
+        for i in [-1, 1]:
+            for j in [-1, 1]:
+                x = i * (size - thickness) / 2
+                y = j * (size - thickness) / 2
+                table_leg_pose = sapien.Pose([x, y, -height / 2])
+                table_leg_half_size = [thickness / 2, thickness / 2, height / 2]
+                builder.add_box_collision(pose=table_leg_pose, half_size=table_leg_half_size)
+                builder.add_box_visual(pose=table_leg_pose, half_size=table_leg_half_size, color=color)
+
+        table = builder.build(name=name)
+        return table
 
     def _build_sphere_site(self, radius, color=(0, 1, 0), name="goal_site"):
         """Build a sphere site (visual only). Used to indicate goal position."""
