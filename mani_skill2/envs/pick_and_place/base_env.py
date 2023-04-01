@@ -16,7 +16,7 @@ from mani_skill2.utils.sapien_utils import (
     vectorize_pose,
 )
 
-
+SAPIEN_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6Inl3NDE0NUBueXUuZWR1IiwiaXAiOiIxNzIuMjAuMC4xIiwicHJpdmlsZWdlIjoxLCJmaWxlT25seSI6dHJ1ZSwiaWF0IjoxNjgwMzc5ODE2LCJleHAiOjE3MTE5MTU4MTZ9.vMujbjASmP5biJC4vi2ShpUJQHQwx6Hu7eQSjmMN2-w"
 class StationaryManipulationEnv(BaseEnv):
     SUPPORTED_ROBOTS = {"panda": Panda, "xmate3_robotiq": Xmate3Robotiq}
     agent: Union[Panda, Xmate3Robotiq]

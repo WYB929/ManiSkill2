@@ -218,9 +218,11 @@ class StackCubeEnv(StationaryManipulationEnv):
         is_cubeB_on_cubeC = self._check_cubeB_on_cubeC()
         is_cubeA_static = check_actor_static(self.cubeA)
         is_cubeB_static = check_actor_static(self.cubeB)
+        is_cubeC_static = check_actor_static(self.cubeC)
         is_cubaA_grasped = self.agent.check_grasp(self.cubeA)
         is_cubeB_grasped = self.agent.check_grasp(self.cubeB)
-        success = is_cubeA_on_cubeB and is_cubeB_on_cubeC and is_cubeA_static and is_cubeB_static and (not is_cubaA_grasped) and (not is_cubeB_grasped)
+        is_cubeC_grasped = self.agent.check_grasp(self.cubeC)
+        success = is_cubeA_on_cubeB and is_cubeB_on_cubeC and is_cubeA_static and is_cubeB_static and is_cubeC_static and (not is_cubaA_grasped) and (not is_cubeB_grasped) and (not is_cubeC_grasped)
 
         return {
             "is_cubaA_grasped": is_cubaA_grasped,
@@ -229,13 +231,66 @@ class StackCubeEnv(StationaryManipulationEnv):
             "is_cubeB_grasped": is_cubeB_grasped,
             "is_cubeB_on_cubeC": is_cubeB_on_cubeC,
             "is_cubeB_static": is_cubeB_static,
+            "is_cubeC_grasped": is_cubeC_grasped,
+            "is_cubeC_static": is_cubeC_static,
+            # "cubeA_pos": self.cubeA.pose.p,
             # "cubeA_vel": np.linalg.norm(self.cubeA.velocity),
             # "cubeA_ang_vel": np.linalg.norm(self.cubeA.angular_velocity),
             "success": success,
         }
+    
+    def update_rewards_with_cubes(self, cubeA, cubeB, reward):
+        cubeA_pos = cubeA.pose.p
+        cubeB_pos = cubeB.pose.p
+        goal_xyz = np.hstack(
+            [cubeB_pos[0:2], cubeB_pos[2] + self.box_half_size[2] * 2]
+        )
+        cubeA_on_cubeB = (
+            np.linalg.norm(goal_xyz[:2] - cubeA_pos[:2])
+            < self.box_half_size[0] * 0.8
+        )
+        cubeA_on_cubeB = cubeA_on_cubeB and (
+            np.abs(goal_xyz[2] - cubeA_pos[2]) <= 0.005
+        )
+        if cubeA_on_cubeB:
+            reward = 10.0
+            # ungrasp reward
+            is_cubeA_grasped = self.agent.check_grasp(self.cubeA)
+            if not is_cubeA_grasped:
+                reward += 2.0
+            else:
+                reward = (
+                    reward
+                    + 2.0 * np.sum(self.agent.robot.get_qpos()[-2:]) / self.gripper_width
+                )
+        else:
+            # grasping reward
+            is_cubeA_grasped = self.agent.check_grasp(self.cubeA)
+            if is_cubeA_grasped:
+                reward += 1.0
+
+            # reaching goal reward, ensuring that cubeA has appropriate height during this process
+            if is_cubeA_grasped:
+                cubeA_to_goal = goal_xyz - cubeA_pos
+                # cubeA_to_goal_xy_dist = np.linalg.norm(cubeA_to_goal[:2])
+                cubeA_to_goal_dist = np.linalg.norm(cubeA_to_goal)
+                appropriate_height_penalty = np.maximum(
+                    np.maximum(2 * cubeA_to_goal[2], 0.0),
+                    np.maximum(2 * (-0.02 - cubeA_to_goal[2]), 0.0),
+                )
+                reaching_reward2 = 2 * (
+                    1 - np.tanh(5.0 * appropriate_height_penalty)
+                )
+                # qvel_penalty = np.sum(np.abs(self.agent.robot.get_qvel())) # prevent the robot arm from moving too fast
+                # reaching_reward2 -= 0.0003 * qvel_penalty
+                # if appropriate_height_penalty < 0.01:
+                reaching_reward2 += 4 * (1 - np.tanh(5.0 * cubeA_to_goal_dist))
+                reward += np.maximum(reaching_reward2, 0.0)
+        return reward
+        
 
     def compute_dense_reward(self, info, **kwargs):
-        gripper_width = (
+        self.gripper_width = (
             self.agent.robot.get_qlimits()[-1, 1] * 2
         )  # NOTE: hard-coded with panda
         reward = 0.0
@@ -249,6 +304,9 @@ class StackCubeEnv(StationaryManipulationEnv):
             )  # trace(A.T @ A) has range [0,8] for A being difference of rotation matrices
             tcp_pose_wrt_cubeA = self.cubeA.pose.inv() * self.tcp.pose
             tcp_rot_wrt_cubeA = tcp_pose_wrt_cubeA.to_transformation_matrix()[:3, :3]
+            tcp_pose_wrt_cubeB = self.cubeB.pose.inv() * self.tcp.pose
+            tcp_rot_wrt_cubeB = tcp_pose_wrt_cubeB.to_transformation_matrix()[:3, :3]
+
             gt_rots = [
                 np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]]),
                 np.array([[0, -1, 0], [-1, 0, 0], [0, 0, -1]]),
@@ -256,14 +314,17 @@ class StackCubeEnv(StationaryManipulationEnv):
                 np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]]),
             ]
             grasp_rot_loss = min(
-                [grasp_rot_loss_fxn(x - tcp_rot_wrt_cubeA) for x in gt_rots]
+                [grasp_rot_loss_fxn(x - tcp_rot_wrt_cubeA - tcp_rot_wrt_cubeB) for x in gt_rots]
             )
             reward += 1 - grasp_rot_loss
 
             cubeB_vel_penalty = np.linalg.norm(self.cubeB.velocity) + np.linalg.norm(
                 self.cubeB.angular_velocity
             )
-            reward -= cubeB_vel_penalty
+            cubeC_vel_penalty = np.linalg.norm(self.cubeC.velocity) + np.linalg.norm(
+                self.cubeC.angular_velocity
+            )
+            reward -= (cubeB_vel_penalty + cubeC_vel_penalty)
 
             # reaching object reward
             tcp_pose = self.tcp.pose.p
@@ -273,52 +334,8 @@ class StackCubeEnv(StationaryManipulationEnv):
             reward += reaching_reward
 
             # check if cubeA is on cubeB
-            cubeA_pos = self.cubeA.pose.p
-            cubeB_pos = self.cubeB.pose.p
-            goal_xyz = np.hstack(
-                [cubeB_pos[0:2], cubeB_pos[2] + self.box_half_size[2] * 2]
-            )
-            cubeA_on_cubeB = (
-                np.linalg.norm(goal_xyz[:2] - cubeA_pos[:2])
-                < self.box_half_size[0] * 0.8
-            )
-            cubeA_on_cubeB = cubeA_on_cubeB and (
-                np.abs(goal_xyz[2] - cubeA_pos[2]) <= 0.005
-            )
-            if cubeA_on_cubeB:
-                reward = 10.0
-                # ungrasp reward
-                is_cubeA_grasped = self.agent.check_grasp(self.cubeA)
-                if not is_cubeA_grasped:
-                    reward += 2.0
-                else:
-                    reward = (
-                        reward
-                        + 2.0 * np.sum(self.agent.robot.get_qpos()[-2:]) / gripper_width
-                    )
-            else:
-                # grasping reward
-                is_cubeA_grasped = self.agent.check_grasp(self.cubeA)
-                if is_cubeA_grasped:
-                    reward += 1.0
-
-                # reaching goal reward, ensuring that cubeA has appropriate height during this process
-                if is_cubeA_grasped:
-                    cubeA_to_goal = goal_xyz - cubeA_pos
-                    # cubeA_to_goal_xy_dist = np.linalg.norm(cubeA_to_goal[:2])
-                    cubeA_to_goal_dist = np.linalg.norm(cubeA_to_goal)
-                    appropriate_height_penalty = np.maximum(
-                        np.maximum(2 * cubeA_to_goal[2], 0.0),
-                        np.maximum(2 * (-0.02 - cubeA_to_goal[2]), 0.0),
-                    )
-                    reaching_reward2 = 2 * (
-                        1 - np.tanh(5.0 * appropriate_height_penalty)
-                    )
-                    # qvel_penalty = np.sum(np.abs(self.agent.robot.get_qvel())) # prevent the robot arm from moving too fast
-                    # reaching_reward2 -= 0.0003 * qvel_penalty
-                    # if appropriate_height_penalty < 0.01:
-                    reaching_reward2 += 4 * (1 - np.tanh(5.0 * cubeA_to_goal_dist))
-                    reward += np.maximum(reaching_reward2, 0.0)
+            reward += self.update_rewards_with_cubes(self.cubeA, self.cubeB, reward)
+            reward += self.update_rewards_with_cubes(self.cubeB, self.cubeC, reward)
 
         return reward
 print("done")
