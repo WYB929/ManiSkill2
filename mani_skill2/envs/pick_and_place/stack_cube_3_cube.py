@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from typing import Dict, Optional, Sequence, Union
 from typing import List, Tuple
 
 import numpy as np
@@ -158,17 +159,21 @@ class StackCubeEnv(StationaryManipulationEnv):
             raise NotImplementedError(self.robot_uid)
         
     def _register_cameras(self):
-        pose = look_at([0.3, 0, 1.1], [-0.1, 0, 0.1])
-        return CameraConfig(
-            "base_camera", pose.p, pose.q, 128, 128, np.pi / 2, 0.01, 10
-        )
+        pose_1 = look_at([0.3, 0, 0.8], [-0.2, 0, 0.1])
+        pose_2 = look_at([0.25, 0.15, 0.7], [-0.1, 0, 0.1])
+        pose_3 = look_at([0.3, 0, 1.0], [-0.1, 0, 0.1])
+        return [CameraConfig("base_camera_1", pose_1.p, pose_2.q, 128, 128, np.pi / 2, 0.01, 10), 
+                CameraConfig("base_camera_2", pose_2.p, pose_2.q, 128, 128, np.pi / 2, 0.01, 10),
+                CameraConfig("base_camera_3", pose_3.p, pose_3.q, 128, 128, np.pi / 2, 0.01, 10)]
     
     def _register_render_cameras(self):
         if self.robot_uid == "panda":
-            pose = look_at([0.4, 0.4, 0.8], [0.0, 0.0, 0.4])
+            pose_1 = look_at([0.4, 0.4, 1.0], [0.0, 0.0, 0.4])
+            pose_2 = look_at([0.4, 0.4, 0.8], [0.0, 0.0, 0.4])
         else:
-            pose = look_at([0.5, 0.5, 1.0], [0.0, 0.0, 0.5])
-        return CameraConfig("render_camera", pose.p, pose.q, 512, 512, 1, 0.01, 10)
+            pose_1 = look_at([0.5, 0.5, 1.0], [0.0, 0.0, 0.5])
+            pose_2 = look_at([0.4, 0.4, 0.8], [0.0, 0.0, 0.4])
+        return [CameraConfig("render_camera", pose_1.p, pose_1.q, 512, 512, 1, 0.01, 10)]
     
     def _setup_viewer(self):
         super()._setup_viewer()
