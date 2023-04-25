@@ -7,9 +7,11 @@ from transforms3d.euler import euler2quat
 
 from mani_skill2.utils.registration import register_env
 from mani_skill2.utils.sapien_utils import vectorize_pose
+import sapien as sp
 
 from .base_env import StationaryManipulationEnv
 
+SAPIEN_ACCESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6Inl3NDE0NUBueXUuZWR1IiwiaXAiOiIxNzIuMjAuMC4xIiwicHJpdmlsZWdlIjoxLCJmaWxlT25seSI6dHJ1ZSwiaWF0IjoxNjgwMzc5ODE2LCJleHAiOjE3MTE5MTU4MTZ9.vMujbjASmP5biJC4vi2ShpUJQHQwx6Hu7eQSjmMN2-w"
 
 @register_env("PickCube-v0", max_episode_steps=200)
 class PickCubeEnv(StationaryManipulationEnv):
@@ -25,6 +27,12 @@ class PickCubeEnv(StationaryManipulationEnv):
         self._add_ground(render=self.bg_name is None)
         self.obj = self._build_cube(self.cube_half_size)
         self.goal_site = self._build_sphere_site(self.goal_thresh)
+        bottleA_urdf = sp.asset.download_partnet_mobility(3520, token=SAPIEN_ACCESS_TOKEN)
+        bottleB_urdf = sp.asset.download_partnet_mobility(3596, token=SAPIEN_ACCESS_TOKEN)
+        urdf_loader = self._scene.create_urdf_loader()
+        urdf_loader.fix_root_link = False
+        self.bottleA = urdf_loader.load(bottleA_urdf)
+        self.bottleB = urdf_loader.load(bottleB_urdf)
 
     def _initialize_actors(self):
         xy = self._episode_rng.uniform(-0.1, 0.1, [2])
@@ -34,6 +42,8 @@ class PickCubeEnv(StationaryManipulationEnv):
             ori = self._episode_rng.uniform(0, 2 * np.pi)
             q = euler2quat(0, 0, ori)
         self.obj.set_pose(Pose(xyz, q))
+        self.bottleA.set_pose(Pose([0.1, 0.1, 0.1], [1, 0, 0, 0]))
+        self.bottleB.set_pose(Pose([0.2, -0.1, 0.1], [1, 0, 0, 0]))
 
     def _initialize_task(self, max_trials=100, verbose=False):
         obj_pos = self.obj.pose.p
