@@ -311,6 +311,8 @@ class StackCubeEnv(StationaryManipulationEnv):
             tcp_rot_wrt_cubeA = tcp_pose_wrt_cubeA.to_transformation_matrix()[:3, :3]
             tcp_pose_wrt_cubeB = self.cubeB.pose.inv() * self.tcp.pose
             tcp_rot_wrt_cubeB = tcp_pose_wrt_cubeB.to_transformation_matrix()[:3, :3]
+            tcp_pose_wrt_cubeC = self.cubeC.pose.inv() * self.tcp.pose
+            tcp_rot_wrt_cubeC = tcp_pose_wrt_cubeC.to_transformation_matrix()[:3, :3]
 
             gt_rots = [
                 np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1]]),
@@ -319,7 +321,7 @@ class StackCubeEnv(StationaryManipulationEnv):
                 np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]]),
             ]
             grasp_rot_loss = min(
-                [grasp_rot_loss_fxn(x - tcp_rot_wrt_cubeA - tcp_rot_wrt_cubeB) for x in gt_rots]
+                [grasp_rot_loss_fxn(x - tcp_rot_wrt_cubeA - tcp_rot_wrt_cubeB - tcp_rot_wrt_cubeC) for x in gt_rots]
             )
             reward += 1 - grasp_rot_loss
 
@@ -332,13 +334,13 @@ class StackCubeEnv(StationaryManipulationEnv):
             reward -= (cubeB_vel_penalty + cubeC_vel_penalty)
 
             # reaching object reward
-            tcp_pose = self.tcp.pose.p
-            cubeA_pos = self.cubeA.pose.p
-            cubeA_to_tcp_dist = np.linalg.norm(tcp_pose - cubeA_pos)
-            reaching_reward = 1 - np.tanh(3.0 * cubeA_to_tcp_dist)
-            reward += reaching_reward
+            # tcp_pose = self.tcp.pose.p
+            # cubeA_pos = self.cubeA.pose.p
+            # cubeA_to_tcp_dist = np.linalg.norm(tcp_pose - cubeA_pos)
+            # reaching_reward = 1 - np.tanh(3.0 * cubeA_to_tcp_dist)
+            # reward += reaching_reward
 
-            # check if cubeA is on cubeB
+            # check if cubeA is on cubeB and cubeB is on cubeC
             reward += self.update_rewards_with_cubes(self.cubeA, self.cubeB, reward)
             reward += self.update_rewards_with_cubes(self.cubeB, self.cubeC, reward)
 
