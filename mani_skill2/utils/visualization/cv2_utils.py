@@ -54,6 +54,7 @@ class OpenCVViewer:
         cv2.imshow(self.name, image)
 
         if non_blocking:
+            cv2.waitKey(delay)
             return
         else:
             key = cv2.waitKey(delay)

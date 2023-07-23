@@ -1,4 +1,5 @@
 import argparse
+import multiprocessing as mp
 
 import gym
 import numpy as np
@@ -7,6 +8,11 @@ from mani_skill2 import make_box_space_readable
 from mani_skill2.envs.sapien_env import BaseEnv
 from mani_skill2.utils.visualization.cv2_utils import OpenCVViewer
 from mani_skill2.utils.wrappers import RecordEpisode
+import zmq
+from mani_skill2.examples import VR_TCP_ADDRESS, VR_TOPIC
+from mani_skill2.examples.vr_controller_state import parse_controller_state
+from mani_skill2.examples.vr_robot_transform import robot_pose_aa_to_affine, affine_to_robot_pose_aa
+from mani_skill2.examples.controller_subscriber import vr_subscriber
 
 
 MS1_ENV_IDS = [
@@ -26,6 +32,7 @@ def parse_args():
     parser.add_argument("--render-mode", type=str, default="cameras")
     parser.add_argument("--enable-sapien-viewer", action="store_true")
     parser.add_argument("--record-dir", type=str)
+    parser.add_argument("--control-opt", type=str, default="key")
     args, opts = parser.parse_known_args()
 
     # Parse env kwargs
@@ -37,6 +44,8 @@ def parse_args():
 
     return args
 
+def get_relative_affine(init_affine, current_affine):
+    return np.linalg.pinv(init_affine) @ current_affine
 
 def main():
     make_box_space_readable()
@@ -66,10 +75,6 @@ def main():
     #     info_on_video=True # when True, will add informative text onto the replay video such as step counter, reward, and other metrics 
     # )
 
-    print("Observation space", env.observation_space)
-    print("Action space", env.action_space)
-    print("Control mode", env.control_mode)
-    print("Reward mode", env.reward_mode)
 
     obs = env.reset()
     after_reset = True
@@ -93,164 +98,313 @@ def main():
     has_gripper = any("gripper" in x for x in env.agent.controller.configs)
     gripper_action = 1
     EE_ACTION = 0.1
-
-    while True:
-        # -------------------------------------------------------------------------- #
-        # Visualization
-        # -------------------------------------------------------------------------- #
-        if args.enable_sapien_viewer:
-            env.render(mode="human")
-
-        render_frame = env.render(mode=args.render_mode)
-
-        if after_reset:
-            after_reset = False
-            # Re-focus on opencv viewer
+    
+    if args.control_opt == "key":
+        while True:
+            # -------------------------------------------------------------------------- #
+            # Visualization
+            # -------------------------------------------------------------------------- #
             if args.enable_sapien_viewer:
-                opencv_viewer.close()
-                opencv_viewer = OpenCVViewer(exit_on_esc=False)
+                env.render(mode="human")
 
-        # -------------------------------------------------------------------------- #
-        # Interaction
-        # -------------------------------------------------------------------------- #
-        # Input
-        key = opencv_viewer.imshow(render_frame)
+            render_frame = env.render(mode=args.render_mode)
 
-        if has_base:
-            assert args.control_mode in ["base_pd_joint_vel_arm_pd_ee_delta_pose"]
-            base_action = np.zeros([4])  # hardcoded
-        else:
-            base_action = np.zeros([0])
+            if after_reset:
+                after_reset = False
+                # Re-focus on opencv viewer
+                if args.enable_sapien_viewer:
+                    opencv_viewer.close()
+                    opencv_viewer = OpenCVViewer(exit_on_esc=False)
 
-        # Parse end-effector action
-        if (
-            "pd_ee_delta_pose" in args.control_mode
-            or "pd_ee_target_delta_pose" in args.control_mode
-        ):
-            ee_action = np.zeros([6])
-        elif (
-            "pd_ee_delta_pos" in args.control_mode
-            or "pd_ee_target_delta_pos" in args.control_mode
-        ):
-            ee_action = np.zeros([3])
-        else:
-            raise NotImplementedError(args.control_mode)
+            # -------------------------------------------------------------------------- #
+            # Interaction
+            # -------------------------------------------------------------------------- #
+            # Input
+            key = opencv_viewer.imshow(render_frame)
 
-        # Base
-        if has_base:
-            if key == "w":  # forward
-                base_action[0] = 1
-            elif key == "s":  # backward
-                base_action[0] = -1
-            elif key == "a":  # left
-                base_action[1] = 1
-            elif key == "d":  # right
-                base_action[1] = -1
-            elif key == "q":  # rotate counter
-                base_action[2] = 1
-            elif key == "e":  # rotate clockwise
-                base_action[2] = -1
-            elif key == "z":  # lift
-                base_action[3] = 1
-            elif key == "x":  # lower
-                base_action[3] = -1
+            if has_base:
+                assert args.control_mode in ["base_pd_joint_vel_arm_pd_ee_delta_pose"]
+                base_action = np.zeros([4])  # hardcoded
+            else:
+                base_action = np.zeros([0])
 
-        # End-effector
-        if num_arms > 0:
-            # Position
-            if key == "i":  # +x
-                ee_action[0] = EE_ACTION
-            elif key == "k":  # -x
-                ee_action[0] = -EE_ACTION
-            elif key == "j":  # +y
-                ee_action[1] = EE_ACTION
-            elif key == "l":  # -y
-                ee_action[1] = -EE_ACTION
-            elif key == "u":  # +z
-                ee_action[2] = EE_ACTION
-            elif key == "o":  # -z
-                ee_action[2] = -EE_ACTION
+            # Parse end-effector action
+            if (
+                "pd_ee_delta_pose" in args.control_mode
+                or "pd_ee_target_delta_pose" in args.control_mode
+            ):
+                ee_action = np.zeros([6])
+            elif (
+                "pd_ee_delta_pos" in args.control_mode
+                or "pd_ee_target_delta_pos" in args.control_mode
+            ):
+                ee_action = np.zeros([3])
+            else:
+                raise NotImplementedError(args.control_mode)
 
-            # Rotation (axis-angle)
-            if key == "1":
-                ee_action[3:6] = (1, 0, 0)
-            elif key == "2":
-                ee_action[3:6] = (-1, 0, 0)
-            elif key == "3":
-                ee_action[3:6] = (0, 1, 0)
-            elif key == "4":
-                ee_action[3:6] = (0, -1, 0)
-            elif key == "5":
-                ee_action[3:6] = (0, 0, 1)
-            elif key == "6":
-                ee_action[3:6] = (0, 0, -1)
+            # Base
+            if has_base:
+                if key == "w":  # forward
+                    base_action[0] = 1
+                elif key == "s":  # backward
+                    base_action[0] = -1
+                elif key == "a":  # left
+                    base_action[1] = 1
+                elif key == "d":  # right
+                    base_action[1] = -1
+                elif key == "q":  # rotate counter
+                    base_action[2] = 1
+                elif key == "e":  # rotate clockwise
+                    base_action[2] = -1
+                elif key == "z":  # lift
+                    base_action[3] = 1
+                elif key == "x":  # lower
+                    base_action[3] = -1
 
-        # Gripper
-        if has_gripper:
-            if key == "f":  # open gripper
+            # End-effector
+            if num_arms > 0:
+                # Position
+                if key == "i":  # +x
+                    ee_action[0] = EE_ACTION
+                elif key == "k":  # -x
+                    ee_action[0] = -EE_ACTION
+                elif key == "j":  # +y
+                    ee_action[1] = EE_ACTION
+                elif key == "l":  # -y
+                    ee_action[1] = -EE_ACTION
+                elif key == "u":  # +z
+                    ee_action[2] = EE_ACTION
+                elif key == "o":  # -z
+                    ee_action[2] = -EE_ACTION
+
+                # Rotation (axis-angle)
+                if key == "1":
+                    ee_action[3:6] = (1, 0, 0)
+                elif key == "2":
+                    ee_action[3:6] = (-1, 0, 0)
+                elif key == "3":
+                    ee_action[3:6] = (0, 1, 0)
+                elif key == "4":
+                    ee_action[3:6] = (0, -1, 0)
+                elif key == "5":
+                    ee_action[3:6] = (0, 0, 1)
+                elif key == "6":
+                    ee_action[3:6] = (0, 0, -1)
+
+            # Gripper
+            if has_gripper:
+                if key == "f":  # open gripper
+                    gripper_action = 1
+                elif key == "g":  # close gripper
+                    gripper_action = -1
+
+            # Other functions
+            if key == "0":  # switch to SAPIEN viewer
+                render_wait()
+            elif key == "r":  # reset env
+                obs = env.reset()
                 gripper_action = 1
-            elif key == "g":  # close gripper
-                gripper_action = -1
+                after_reset = True
+                continue
+            elif key == None:  # exit
+                break
 
-        # Other functions
-        if key == "0":  # switch to SAPIEN viewer
-            render_wait()
-        elif key == "r":  # reset env
-            obs = env.reset()
-            gripper_action = 1
-            after_reset = True
-            continue
-        elif key == None:  # exit
-            break
+            # Visualize observation
+            if key == "v":
+                if "rgbd" in env.obs_mode:
+                    from itertools import chain
 
-        # Visualize observation
-        if key == "v":
-            if "rgbd" in env.obs_mode:
-                from itertools import chain
+                    from mani_skill2.utils.visualization.misc import (
+                        observations_to_images,
+                        tile_images,
+                    )
 
-                from mani_skill2.utils.visualization.misc import (
-                    observations_to_images,
-                    tile_images,
+                    images = list(
+                        chain(*[observations_to_images(x) for x in obs["image"].values()])
+                    )
+                    render_frame = tile_images(images)
+                    opencv_viewer.imshow(render_frame)
+                elif "pointcloud" in env.obs_mode:
+                    import trimesh
+
+                    xyzw = obs["pointcloud"]["xyzw"]
+                    mask = xyzw[..., 3] > 0
+                    rgb = obs["pointcloud"]["rgb"]
+                    if "robot_seg" in obs["pointcloud"]:
+                        robot_seg = obs["pointcloud"]["robot_seg"]
+                        rgb = np.uint8(robot_seg * [11, 61, 127])
+                    trimesh.PointCloud(xyzw[mask, :3], rgb[mask]).show()
+
+            # -------------------------------------------------------------------------- #
+            # Post-process action
+            # -------------------------------------------------------------------------- #
+            if args.env_id in MS1_ENV_IDS:
+                action_dict = dict(
+                    base=base_action,
+                    right_arm=ee_action,
+                    right_gripper=gripper_action,
+                    left_arm=np.zeros_like(ee_action),
+                    left_gripper=np.zeros_like(gripper_action),
                 )
+                action = env.agent.controller.from_action_dict(action_dict)
+            else:
+                action_dict = dict(base=base_action, arm=ee_action, gripper=gripper_action)
+                action = env.agent.controller.from_action_dict(action_dict)
 
-                images = list(
-                    chain(*[observations_to_images(x) for x in obs["image"].values()])
+            print("action", action)
+            obs, reward, done, info = env.step(action)
+            print("reward", reward)
+            print("done", done)
+            print("info", info)
+        # env.flush_video()
+        env.close()
+
+    elif args.control_opt == "vr":
+        
+        # create queues for multiprocess message transfer
+        shared_queue = mp.Queue()
+
+        subscriber_process = mp.Process(target=vr_subscriber, args=(VR_TCP_ADDRESS, VR_TOPIC, shared_queue))
+        subscriber_process.start()
+
+        start_left, start_right = False, False
+        # Calibration frames
+        init_left_affine, init_right_affine = None, None
+
+        while True:
+
+            # -------------------------------------------------------------------------- #
+            # Visualization
+            # -------------------------------------------------------------------------- #
+            if args.enable_sapien_viewer:
+                env.render(mode="human")
+
+            render_frame = env.render(mode=args.render_mode)
+
+            if after_reset:
+                after_reset = False
+                # Re-focus on opencv viewer
+                if args.enable_sapien_viewer:
+                    opencv_viewer.close()
+                    opencv_viewer = OpenCVViewer(exit_on_esc=False)
+
+            opencv_viewer.imshow(render_frame, non_blocking=True, delay=1)
+
+            # -------------------------------------------------------------------------- #
+            # Interaction
+            # -------------------------------------------------------------------------- #
+            # Input
+
+
+            if has_base:
+                assert args.control_mode in ["base_pd_joint_vel_arm_pd_ee_delta_pose"]
+                base_action = np.zeros([4])  # hardcoded
+            else:
+                base_action = np.zeros([0])
+            
+            # Parse end-effector action
+            if (
+                "pd_ee_delta_pose" in args.control_mode
+                or "pd_ee_target_delta_pose" in args.control_mode
+            ):
+                ee_action = np.zeros([6])
+            elif (
+                "pd_ee_delta_pos" in args.control_mode
+                or "pd_ee_target_delta_pos" in args.control_mode
+            ):
+                ee_action = np.zeros([3])
+            else:
+                raise NotImplementedError(args.control_mode)
+            
+            parsed_data = shared_queue.get()
+            print(f"Data: {parsed_data}")
+            
+            # Base
+            if has_base:
+                base_action[0] = parsed_data.left_thumbstick_axes[1] # forward and backward
+                base_action[1] = parsed_data.left_thumbstick_axes[0] # left and right
+                base_action[2] = parsed_data.right_thumbstick_axes[0] # rotation
+                base_action[3] = parsed_data.right_thumbstick_axes[1] # lift and lower
+
+            # End-effector
+            if num_arms > 0:
+                # control with left teleop or right teleop
+                # left
+                if parsed_data.left_x:
+                    start_left = True
+                    init_left_affine = parsed_data.left_affine
+                
+                # right
+                if parsed_data.right_a:
+                    start_right = True
+                    init_right_affine = parsed_data.right_affine
+
+                # Tracking Position an Rotation
+                if start_left:
+                    left_relative_affine = get_relative_affine(init_left_affine, parsed_data.left_affine)
+                    ee_action = affine_to_robot_pose_aa(left_relative_affine)
+
+                elif start_right:
+                    right_relative_affine = get_relative_affine(init_right_affine, parsed_data.right_affine)
+                    ee_action = affine_to_robot_pose_aa(right_relative_affine)
+
+            # Gripper
+            if has_gripper:
+                if start_left:
+                    # open gripper with index trigger
+                    if parsed_data.left_index_trigger > 0:
+                        gripper_action = 1
+                    # close gripper with hand trigger
+                    elif parsed_data.left_hand_trigger > 0:
+                        gripper_action = -1
+                elif start_right:
+                    # open gripper with index trigger
+                    if parsed_data.right_index_trigger > 0:
+                        gripper_action = 1
+                    # close gripper with hand trigger
+                    elif parsed_data.right_hand_trigger > 0:
+                        gripper_action = -1
+
+            # Other functions
+            if parsed_data.left_x and parsed_data.right_a:  # reset env
+                obs = env.reset()
+                gripper_action = 1
+                # reset calibration frames and choice of left or right teleop
+                start_left, start_right = False, False
+                init_left_affine, init_right_affine = None, None
+                after_reset = True
+                continue
+
+            if parsed_data.left_y and parsed_data.right_b:
+                print("Exiting program")
+                break # exit
+        
+            # -------------------------------------------------------------------------- #
+            # Post-process action
+            # -------------------------------------------------------------------------- #
+            if args.env_id in MS1_ENV_IDS:
+                action_dict = dict(
+                    base=base_action,
+                    right_arm=ee_action,
+                    right_gripper=gripper_action,
+                    left_arm=np.zeros_like(ee_action),
+                    left_gripper=np.zeros_like(gripper_action),
                 )
-                render_frame = tile_images(images)
-                opencv_viewer.imshow(render_frame)
-            elif "pointcloud" in env.obs_mode:
-                import trimesh
+                action = env.agent.controller.from_action_dict(action_dict)
+            else:
+                action_dict = dict(base=base_action, arm=ee_action, gripper=gripper_action)
+                # print(action_dict)
+                action = env.agent.controller.from_action_dict(action_dict)
 
-                xyzw = obs["pointcloud"]["xyzw"]
-                mask = xyzw[..., 3] > 0
-                rgb = obs["pointcloud"]["rgb"]
-                if "robot_seg" in obs["pointcloud"]:
-                    robot_seg = obs["pointcloud"]["robot_seg"]
-                    rgb = np.uint8(robot_seg * [11, 61, 127])
-                trimesh.PointCloud(xyzw[mask, :3], rgb[mask]).show()
-
-        # -------------------------------------------------------------------------- #
-        # Post-process action
-        # -------------------------------------------------------------------------- #
-        if args.env_id in MS1_ENV_IDS:
-            action_dict = dict(
-                base=base_action,
-                right_arm=ee_action,
-                right_gripper=gripper_action,
-                left_arm=np.zeros_like(ee_action),
-                left_gripper=np.zeros_like(gripper_action),
-            )
-            action = env.agent.controller.from_action_dict(action_dict)
-        else:
-            action_dict = dict(base=base_action, arm=ee_action, gripper=gripper_action)
-            action = env.agent.controller.from_action_dict(action_dict)
-
-        obs, reward, done, info = env.step(action)
-        print("reward", reward)
-        print("done", done)
-        print("info", info)
-    env.flush_video()
-    env.close()
+            print("action", action)
+            obs, reward, done, info = env.step(action)
+            print("reward", reward)
+            print("done", done)
+            print("info", info)
+        # env.flush_video()
+        env.close()
+    else:
+        raise NotImplementedError
 
 
 if __name__ == "__main__":
