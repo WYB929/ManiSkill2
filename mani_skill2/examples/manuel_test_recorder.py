@@ -3,6 +3,7 @@ import multiprocessing as mp
 
 import gym
 import numpy as np
+import time
 
 from mani_skill2 import make_box_space_readable
 from mani_skill2.envs.sapien_env import BaseEnv
@@ -13,6 +14,18 @@ from mani_skill2.examples import VR_TCP_ADDRESS, VR_TOPIC
 from mani_skill2.examples.vr_controller_state import parse_controller_state
 from mani_skill2.examples.vr_robot_transform import robot_pose_aa_to_affine, affine_to_robot_pose_aa
 from mani_skill2.examples.controller_subscriber import vr_subscriber
+from mani_skill2.examples.controller_queue import ControllerQueue
+
+# set up logging to a file
+import logging
+import os
+if not os.path.exists("logs"):
+    os.makedirs("logs")
+logging.basicConfig(
+    level=logging.DEBUG,
+    datefmt="%m-%d %H:%M",
+    filename="logs/manuel_test_recorder.log",
+)
 
 
 MS1_ENV_IDS = [
@@ -36,10 +49,10 @@ def parse_args():
     args, opts = parser.parse_known_args()
 
     # Parse env kwargs
-    print("opts:", opts)
+    logging.info(f"opts: {opts}")
     eval_str = lambda x: eval(x[1:]) if x.startswith("@") else x
     env_kwargs = dict((x, eval_str(y)) for x, y in zip(opts[0::2], opts[1::2]))
-    print("env_kwargs:", env_kwargs)
+    logging.info(f"env_kwargs: {env_kwargs}")
     args.env_kwargs = env_kwargs
 
     return args
@@ -251,35 +264,49 @@ def main():
                 action_dict = dict(base=base_action, arm=ee_action, gripper=gripper_action)
                 action = env.agent.controller.from_action_dict(action_dict)
 
-            print("action", action)
+            logging.info(f"action {action}")
             obs, reward, done, info = env.step(action)
-            print("reward", reward)
-            print("done", done)
-            print("info", info)
+            logging.info(f"reward {reward}")
+            logging.info(f"done {done}")
+            logging.info(f"info {info}")
         # env.flush_video()
         env.close()
 
     elif args.control_opt == "vr":
         
         # create queues for multiprocess message transfer
-        shared_queue = mp.Queue()
+        # shared_queue = mp.Queue()
 
-        subscriber_process = mp.Process(target=vr_subscriber, args=(VR_TCP_ADDRESS, VR_TOPIC, shared_queue))
-        subscriber_process.start()
+        # subscriber_process = mp.Process(target=vr_subscriber, args=(VR_TCP_ADDRESS, VR_TOPIC, shared_queue))
+        # subscriber_process.start()
+
+        context = zmq.Context()
+        socket = context.socket(zmq.SUB)
+        socket.connect(VR_TCP_ADDRESS)
+
+        # subscribe to desired topic
+        socket.setsockopt_string(zmq.SUBSCRIBE, VR_TOPIC)
+        socket.setsockopt(zmq.CONFLATE, 1)
+
+        print("Start Listening...")
 
         start_left, start_right = False, False
         # Calibration frames
         init_left_affine, init_right_affine = None, None
 
-        while True:
+        left_x_pressed, right_a_pressed = 0, 0
 
+        while True:
+            import timeit; start_loop = timeit.default_timer()
             # -------------------------------------------------------------------------- #
             # Visualization
             # -------------------------------------------------------------------------- #
             if args.enable_sapien_viewer:
                 env.render(mode="human")
-
+            import timeit; start = timeit.default_timer()
             render_frame = env.render(mode=args.render_mode)
+            stop = timeit.default_timer()
+            logging.info(f'Render: {stop - start}')
 
             if after_reset:
                 after_reset = False
@@ -288,7 +315,10 @@ def main():
                     opencv_viewer.close()
                     opencv_viewer = OpenCVViewer(exit_on_esc=False)
 
+            import timeit; start = timeit.default_timer()
             opencv_viewer.imshow(render_frame, non_blocking=True, delay=1)
+            stop = timeit.default_timer()
+            logging.info(f'imshow: {stop - start}')
 
             # -------------------------------------------------------------------------- #
             # Interaction
@@ -316,8 +346,12 @@ def main():
             else:
                 raise NotImplementedError(args.control_mode)
             
-            parsed_data = shared_queue.get()
-            print(f"Data: {parsed_data}")
+            # parsed_data = shared_queue.get()
+            [received_topic, received_data] = socket.recv_multipart()
+            parsed_data = received_data.decode("utf-8")
+            parsed_data = parse_controller_state(parsed_data)
+            # get timestamp
+            logging.info(f"Data: {parsed_data}")
             
             # Base
             if has_base:
@@ -330,12 +364,13 @@ def main():
             if num_arms > 0:
                 # control with left teleop or right teleop
                 # left
-                if parsed_data.left_x:
+                if parsed_data.left_x and left_x_pressed == 0:
+                    print("Left Telelop Seleted")
                     start_left = True
+                    left_x_pressed = 1
                     init_left_affine = parsed_data.left_affine
-                
                 # right
-                if parsed_data.right_a:
+                elif parsed_data.right_a:
                     start_right = True
                     init_right_affine = parsed_data.right_affine
 
@@ -343,7 +378,6 @@ def main():
                 if start_left:
                     left_relative_affine = get_relative_affine(init_left_affine, parsed_data.left_affine)
                     ee_action = affine_to_robot_pose_aa(left_relative_affine)
-
                 elif start_right:
                     right_relative_affine = get_relative_affine(init_right_affine, parsed_data.right_affine)
                     ee_action = affine_to_robot_pose_aa(right_relative_affine)
@@ -354,9 +388,11 @@ def main():
                     # open gripper with index trigger
                     if parsed_data.left_index_trigger > 0:
                         gripper_action = 1
+                        print("open gripper")
                     # close gripper with hand trigger
                     elif parsed_data.left_hand_trigger > 0:
                         gripper_action = -1
+                        print("close gripper")
                 elif start_right:
                     # open gripper with index trigger
                     if parsed_data.right_index_trigger > 0:
@@ -376,7 +412,7 @@ def main():
                 continue
 
             if parsed_data.left_y and parsed_data.right_b:
-                print("Exiting program")
+                logging.info("Exiting program")
                 break # exit
         
             # -------------------------------------------------------------------------- #
@@ -393,14 +429,20 @@ def main():
                 action = env.agent.controller.from_action_dict(action_dict)
             else:
                 action_dict = dict(base=base_action, arm=ee_action, gripper=gripper_action)
-                # print(action_dict)
+                # logging.info(action_dict)
                 action = env.agent.controller.from_action_dict(action_dict)
 
-            print("action", action)
+            logging.info(f"action {action}")
+            import timeit; start = timeit.default_timer()
             obs, reward, done, info = env.step(action)
-            print("reward", reward)
-            print("done", done)
-            print("info", info)
+            stop = timeit.default_timer()
+            logging.info(f'Step: {stop - start}')
+            logging.info(f"reward {reward}")
+            logging.info(f"done {done}")
+            logging.info(f"info {info}")
+            stop_loop = timeit.default_timer()
+            logging.info(f'Iteration: {stop_loop - start_loop}')
+            # time.sleep(0.01)
         # env.flush_video()
         env.close()
     else:
