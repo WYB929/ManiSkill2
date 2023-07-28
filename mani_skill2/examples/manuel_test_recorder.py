@@ -283,6 +283,7 @@ def main():
         start_left, start_right = False, False
         # Calibration frames
         init_left_affine, init_right_affine = None, None
+        prev_affine = None
 
         left_x_pressed, right_a_pressed = 0, 0
 
@@ -352,20 +353,24 @@ def main():
                     start_left = True
                     left_x_pressed = 1
                     init_left_affine = parsed_data.left_affine
+                    prev_affine = init_left_affine
                 # right
                 elif parsed_data.right_a and right_a_pressed == 0:
                     print("Right Telelop Seleted")
                     start_right = True
                     right_a_pressed = 1
                     init_right_affine = parsed_data.right_affine
+                    prev_affine = init_right_affine
 
                 # Tracking Position an Rotation
                 if start_left:
-                    left_relative_affine = get_relative_affine(init_left_affine, parsed_data.left_affine)
+                    left_relative_affine = get_relative_affine(prev_affine, parsed_data.left_affine)
                     ee_action = affine_to_robot_pose_aa(left_relative_affine)
+                    prev_affine = parsed_data.left_affine
                 elif start_right:
-                    right_relative_affine = get_relative_affine(init_right_affine, parsed_data.right_affine)
+                    right_relative_affine = get_relative_affine(prev_affine, parsed_data.right_affine)
                     ee_action = affine_to_robot_pose_aa(right_relative_affine)
+                    prev_affine = parsed_data.right_affine
 
             # Gripper
             if has_gripper:
@@ -420,7 +425,6 @@ def main():
 
             logging.info(f"action {action}")
             obs, reward, done, info = env.step(action)
-            logging.info(f'Step: {stop - start}')
             logging.info(f"reward {reward}")
             logging.info(f"done {done}")
             logging.info(f"info {info}")
