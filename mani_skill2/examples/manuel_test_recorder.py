@@ -11,10 +11,8 @@ from mani_skill2.utils.visualization.cv2_utils import OpenCVViewer
 from mani_skill2.utils.wrappers import RecordEpisode
 import zmq
 from mani_skill2.examples import VR_TCP_ADDRESS, VR_TOPIC
-from mani_skill2.examples.vr_controller_state import parse_controller_state
 from mani_skill2.examples.vr_robot_transform import robot_pose_aa_to_affine, affine_to_robot_pose_aa
-from mani_skill2.examples.controller_subscriber import vr_subscriber
-from mani_skill2.examples.controller_queue import ControllerQueue
+from mani_skill2.examples.controller_subscriber import vr_subscriber, get_data
 
 # set up logging to a file
 import logging
@@ -275,20 +273,12 @@ def main():
     elif args.control_opt == "vr":
         
         # create queues for multiprocess message transfer
-        # shared_queue = mp.Queue()
+        shared_queue = mp.Queue()
 
-        # subscriber_process = mp.Process(target=vr_subscriber, args=(VR_TCP_ADDRESS, VR_TOPIC, shared_queue))
-        # subscriber_process.start()
+        lock = mp.Lock()
 
-        context = zmq.Context()
-        socket = context.socket(zmq.SUB)
-        socket.connect(VR_TCP_ADDRESS)
-
-        # subscribe to desired topic
-        socket.setsockopt_string(zmq.SUBSCRIBE, VR_TOPIC)
-        socket.setsockopt(zmq.CONFLATE, 1)
-
-        print("Start Listening...")
+        subscriber_process = mp.Process(target=vr_subscriber, args=(VR_TCP_ADDRESS, VR_TOPIC, shared_queue, lock))
+        subscriber_process.start()
 
         start_left, start_right = False, False
         # Calibration frames
@@ -303,10 +293,7 @@ def main():
             # -------------------------------------------------------------------------- #
             if args.enable_sapien_viewer:
                 env.render(mode="human")
-            import timeit; start = timeit.default_timer()
             render_frame = env.render(mode=args.render_mode)
-            stop = timeit.default_timer()
-            logging.info(f'Render: {stop - start}')
 
             if after_reset:
                 after_reset = False
@@ -315,10 +302,7 @@ def main():
                     opencv_viewer.close()
                     opencv_viewer = OpenCVViewer(exit_on_esc=False)
 
-            import timeit; start = timeit.default_timer()
             opencv_viewer.imshow(render_frame, non_blocking=True, delay=1)
-            stop = timeit.default_timer()
-            logging.info(f'imshow: {stop - start}')
 
             # -------------------------------------------------------------------------- #
             # Interaction
@@ -346,12 +330,11 @@ def main():
             else:
                 raise NotImplementedError(args.control_mode)
             
-            # parsed_data = shared_queue.get()
-            [received_topic, received_data] = socket.recv_multipart()
-            parsed_data = received_data.decode("utf-8")
-            parsed_data = parse_controller_state(parsed_data)
-            # get timestamp
-            logging.info(f"Data: {parsed_data}")
+            parsed_data = get_data(lock, shared_queue)
+            logging.info(f"Data {parsed_data}")
+            # avoid NoneType
+            if parsed_data is None:
+                continue
             
             # Base
             if has_base:
@@ -370,8 +353,10 @@ def main():
                     left_x_pressed = 1
                     init_left_affine = parsed_data.left_affine
                 # right
-                elif parsed_data.right_a:
+                elif parsed_data.right_a and right_a_pressed == 0:
+                    print("Right Telelop Seleted")
                     start_right = True
+                    right_a_pressed = 1
                     init_right_affine = parsed_data.right_affine
 
                 # Tracking Position an Rotation
@@ -408,6 +393,7 @@ def main():
                 # reset calibration frames and choice of left or right teleop
                 start_left, start_right = False, False
                 init_left_affine, init_right_affine = None, None
+                left_x_pressed, right_a_pressed = 0, 0
                 after_reset = True
                 continue
 
@@ -433,17 +419,11 @@ def main():
                 action = env.agent.controller.from_action_dict(action_dict)
 
             logging.info(f"action {action}")
-            import timeit; start = timeit.default_timer()
             obs, reward, done, info = env.step(action)
-            stop = timeit.default_timer()
             logging.info(f'Step: {stop - start}')
             logging.info(f"reward {reward}")
             logging.info(f"done {done}")
             logging.info(f"info {info}")
-            stop_loop = timeit.default_timer()
-            logging.info(f'Iteration: {stop_loop - start_loop}')
-            # time.sleep(0.01)
-        # env.flush_video()
         env.close()
     else:
         raise NotImplementedError
