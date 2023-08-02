@@ -11,7 +11,7 @@ from mani_skill2.utils.visualization.cv2_utils import OpenCVViewer
 from mani_skill2.utils.wrappers import RecordEpisode
 import zmq
 from mani_skill2.examples import VR_TCP_ADDRESS, VR_TOPIC
-from mani_skill2.examples.vr_robot_transform import robot_pose_aa_to_affine, affine_to_robot_pose_aa
+from mani_skill2.examples.vr_robot_transform import affine_to_robot_pose, get_relative_affine
 from mani_skill2.examples.controller_subscriber import vr_subscriber, get_data
 
 # set up logging to a file
@@ -54,9 +54,6 @@ def parse_args():
     args.env_kwargs = env_kwargs
 
     return args
-
-def get_relative_affine(init_affine, current_affine):
-    return np.linalg.pinv(init_affine) @ current_affine
 
 def main():
     make_box_space_readable()
@@ -288,7 +285,6 @@ def main():
         left_x_pressed, right_a_pressed = 0, 0
 
         while True:
-            import timeit; start_loop = timeit.default_timer()
             # -------------------------------------------------------------------------- #
             # Visualization
             # -------------------------------------------------------------------------- #
@@ -337,40 +333,71 @@ def main():
             if parsed_data is None:
                 continue
             
+            if parsed_data.left_thumbstick or parsed_data.right_thumbstick:
+                prev_affine = prev_affine
+                continue
             # Base
             if has_base:
-                base_action[0] = parsed_data.left_thumbstick_axes[1] # forward and backward
-                base_action[1] = parsed_data.left_thumbstick_axes[0] # left and right
-                base_action[2] = parsed_data.right_thumbstick_axes[0] # rotation
-                base_action[3] = parsed_data.right_thumbstick_axes[1] # lift and lower
+                if start_left:
+                    base_action[0] = parsed_data.right_thumbstick_axes[1] # forward and backward
+                    base_action[1] = parsed_data.right_thumbstick_axes[0] # left and right
+                    base_action[2] = parsed_data.right_thumbstick_axes[0] # rotation
+                    base_action[3] = parsed_data.right_thumbstick_axes[1] # lift and lower
+                elif start_right:
+                    base_action[0] = parsed_data.left_thumbstick_axes[1] # forward and backward
+                    base_action[1] = parsed_data.left_thumbstick_axes[0] # left and right
+                    base_action[2] = parsed_data.left_thumbstick_axes[0] # rotation
+                    base_action[3] = parsed_data.left_thumbstick_axes[1] # lift and lower
 
             # End-effector
             if num_arms > 0:
                 # control with left teleop or right teleop
                 # left
-                if parsed_data.left_x and left_x_pressed == 0:
+                if parsed_data.left_x and (left_x_pressed == 0):
                     print("Left Telelop Seleted")
                     start_left = True
                     left_x_pressed = 1
                     init_left_affine = parsed_data.left_affine
                     prev_affine = init_left_affine
                 # right
-                elif parsed_data.right_a and right_a_pressed == 0:
+                elif parsed_data.right_a and (right_a_pressed == 0):
                     print("Right Telelop Seleted")
                     start_right = True
                     right_a_pressed = 1
                     init_right_affine = parsed_data.right_affine
                     prev_affine = init_right_affine
 
-                # Tracking Position an Rotation
+                # Tracking Position
                 if start_left:
                     left_relative_affine = get_relative_affine(prev_affine, parsed_data.left_affine)
-                    ee_action = affine_to_robot_pose_aa(left_relative_affine)
+                    ee_action[0:3] = affine_to_robot_pose(left_relative_affine)[0:3]
                     prev_affine = parsed_data.left_affine
                 elif start_right:
                     right_relative_affine = get_relative_affine(prev_affine, parsed_data.right_affine)
-                    ee_action = affine_to_robot_pose_aa(right_relative_affine)
+                    ee_action[0:3] = affine_to_robot_pose(right_relative_affine)[0:3]
                     prev_affine = parsed_data.right_affine
+                
+                # Rotation
+                if start_left:
+                    ee_action[3] = parsed_data.left_thumbstick_axes[0]
+                    ee_action[4] = parsed_data.left_thumbstick_axes[1]
+                    if parsed_data.left_x and (left_x_pressed==1): # rotate gripper
+                        ee_action[5] = 1
+                    elif parsed_data.left_y:
+                        ee_action[5] = -1
+                    else:
+                        ee_action[5] = 0
+
+                elif start_right:
+                    ee_action[3] = parsed_data.right_thumbstick_axes[0]
+                    ee_action[4] = parsed_data.right_thumbstick_axes[1]
+                    if parsed_data.right_a and (right_a_pressed==1): # rotate gripper
+                        ee_action[5] = 1
+                    elif parsed_data.right_b:
+                        ee_action[5] = -1
+                    else:
+                        ee_action[5] = 0
+
 
             # Gripper
             if has_gripper:
@@ -378,11 +405,9 @@ def main():
                     # open gripper with index trigger
                     if parsed_data.left_index_trigger > 0:
                         gripper_action = 1
-                        print("open gripper")
                     # close gripper with hand trigger
                     elif parsed_data.left_hand_trigger > 0:
                         gripper_action = -1
-                        print("close gripper")
                 elif start_right:
                     # open gripper with index trigger
                     if parsed_data.right_index_trigger > 0:
@@ -392,7 +417,7 @@ def main():
                         gripper_action = -1
 
             # Other functions
-            if parsed_data.left_x and parsed_data.right_a:  # reset env
+            if parsed_data.left_y and parsed_data.right_b:  # reset env
                 obs = env.reset()
                 gripper_action = 1
                 # reset calibration frames and choice of left or right teleop
@@ -402,7 +427,7 @@ def main():
                 after_reset = True
                 continue
 
-            if parsed_data.left_y and parsed_data.right_b:
+            if parsed_data.left_x and parsed_data.right_a:
                 logging.info("Exiting program")
                 break # exit
         

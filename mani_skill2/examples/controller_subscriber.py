@@ -39,7 +39,7 @@ def vr_subscriber(subscriber_address, topic, queue, lock):
         parsed_data = received_data.decode("utf-8")
         parsed_data = parse_controller_state(parsed_data)
 
-        if parsed_data.left_y and parsed_data.right_b:
+        if parsed_data.left_x and parsed_data.right_a:
             end_check = True
             print("End of the subscriber")
         update_queue(queue, parsed_data, lock)
