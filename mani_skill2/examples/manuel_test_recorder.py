@@ -3,7 +3,6 @@ import multiprocessing as mp
 
 import gym
 import numpy as np
-import time
 
 from mani_skill2 import make_box_space_readable
 from mani_skill2.envs.sapien_env import BaseEnv
@@ -258,7 +257,7 @@ def main():
             else:
                 action_dict = dict(base=base_action, arm=ee_action, gripper=gripper_action)
                 action = env.agent.controller.from_action_dict(action_dict)
-
+            
             logging.info(f"action {action}")
             obs, reward, done, info = env.step(action)
             logging.info(f"reward {reward}")
@@ -283,7 +282,10 @@ def main():
         prev_affine = None
 
         left_x_pressed, right_a_pressed = 0, 0
-
+        robot_gripper = env.agent.robot.get_links()[9]
+        gripper_init_affine = robot_gripper.pose.to_transformation_matrix()
+        gripper_init_affine[:3, 3] = [0, 0, 0]
+        gripper_current_affine = gripper_init_affine
         while True:
             # -------------------------------------------------------------------------- #
             # Visualization
@@ -329,12 +331,17 @@ def main():
             
             parsed_data = get_data(lock, shared_queue)
             logging.info(f"Data {parsed_data}")
-            # avoid NoneType
+            # avoid empty data
             if parsed_data is None:
                 continue
-            
+
+            # adjust hand position
             if parsed_data.left_thumbstick or parsed_data.right_thumbstick:
-                prev_affine = prev_affine
+                # prev_affine = prev_affine
+                if start_left:
+                    init_left_affine = parsed_data.left_affine
+                elif start_right:
+                    init_right_affine = parsed_data.right_affine
                 continue
             # Base
             if has_base:
@@ -368,13 +375,20 @@ def main():
                     prev_affine = init_right_affine
 
                 # Tracking Position
+                # get the affine of current gripper
+                robot_gripper = env.agent.robot.get_links()[9]
+                gripper_current_affine = robot_gripper.pose.to_transformation_matrix()
+                gripper_current_affine[:3, 3] = [0, 0, 0]
+                # get the relative affine of current gripper
+                relative_rot = get_relative_affine(gripper_init_affine, gripper_current_affine)[:3, :3]
+
                 if start_left:
                     left_relative_affine = get_relative_affine(prev_affine, parsed_data.left_affine)
-                    ee_action[0:3] = affine_to_robot_pose(left_relative_affine)[0:3]
+                    ee_action[0:3] = np.linalg.pinv(relative_rot) @ affine_to_robot_pose(left_relative_affine)[0:3]
                     prev_affine = parsed_data.left_affine
                 elif start_right:
                     right_relative_affine = get_relative_affine(prev_affine, parsed_data.right_affine)
-                    ee_action[0:3] = affine_to_robot_pose(right_relative_affine)[0:3]
+                    ee_action[0:3] = np.linalg.pinv(relative_rot) @ affine_to_robot_pose(right_relative_affine)[0:3]
                     prev_affine = parsed_data.right_affine
                 
                 # Rotation
